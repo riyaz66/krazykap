@@ -49,6 +49,7 @@ interface QuestionRow {
   explanation: string | null;
   timer_seconds: number;
   topic_id: string | null;
+  set_name: string | null;
 }
 
 interface TopicRow {
@@ -62,10 +63,23 @@ export function Dashboard() {
   const [title, setTitle] = useState("");
   const [creating, setCreating] = useState(false);
 
+  interface PastRoomRow {
+    id: string;
+    code: string;
+    title: string;
+    status: string;
+    rounds_total: number;
+    created_at: string;
+    closed_at: string | null;
+  }
+
   const [questions, setQuestions] = useState<QuestionRow[]>([]);
   const [topics, setTopics] = useState<TopicRow[]>([]);
+  const [pastRooms, setPastRooms] = useState<PastRoomRow[]>([]);
   const [loadingQs, setLoadingQs] = useState(true);
   const [builderOpen, setBuilderOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [guideOpen, setGuideOpen] = useState(false);
 
   useEffect(() => {
     void supabase.auth.getUser().then(({ data }) => setEmail(data.user?.email ?? ""));
@@ -74,16 +88,22 @@ export function Dashboard() {
 
   async function loadBank() {
     setLoadingQs(true);
-    const [q, t] = await Promise.all([
+    const [q, t, r] = await Promise.all([
       supabase
         .from("questions")
-        .select("id,prompt,type,difficulty,options,correct_answer,explanation,timer_seconds,topic_id")
+        .select("id,prompt,type,difficulty,options,correct_answer,explanation,timer_seconds,topic_id,set_name")
         .order("created_at", { ascending: false })
         .limit(50),
       supabase.from("topics").select("id,name").order("name"),
+      supabase
+        .from("rooms")
+        .select("id,code,title,status,rounds_total,created_at,closed_at")
+        .order("created_at", { ascending: false })
+        .limit(20),
     ]);
     if (q.data) setQuestions(q.data as QuestionRow[]);
     if (t.data) setTopics(t.data as TopicRow[]);
+    if (r.data) setPastRooms(r.data as PastRoomRow[]);
     setLoadingQs(false);
   }
 
@@ -205,6 +225,56 @@ export function Dashboard() {
 
         <Separator className="my-8" />
 
+        {/* ----------------------------------------------- room history */}
+        <section className="mb-8">
+          <div className="mb-4">
+            <h2 className="flex items-center gap-2 font-display text-xl font-extrabold">
+              <Clock className="size-5 text-[var(--primary)]" /> Room History
+            </h2>
+            <p className="text-sm text-muted-foreground">
+              Past classroom sessions saved for your reference.
+            </p>
+          </div>
+
+          {pastRooms.length === 0 ? (
+            <div className="rounded-2xl border border-dashed border-border px-6 py-8 text-center text-sm text-muted-foreground">
+              No previous room history yet.
+            </div>
+          ) : (
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {pastRooms.map((r) => (
+                <div key={r.id} className="rounded-xl border border-border bg-card p-4 flex flex-col justify-between">
+                  <div>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-display text-base font-bold">{r.title}</span>
+                      <Badge variant={r.status === "active" ? "default" : "secondary"}>
+                        {r.status}
+                      </Badge>
+                    </div>
+                    <p className="mt-1 font-mono text-xs text-muted-foreground">Code: {r.code}</p>
+                    <p className="mt-2 text-xs font-semibold text-foreground">
+                      {r.rounds_total} question{r.rounds_total === 1 ? "" : "s"} launched
+                    </p>
+                  </div>
+                  <div className="mt-3 flex items-center justify-between border-t border-border/60 pt-2">
+                    <span className="text-[10px] text-muted-foreground">
+                      {new Date(r.created_at).toLocaleDateString()} at{" "}
+                      {new Date(r.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                    </span>
+                    <Button variant="ghost" size="xs" asChild>
+                      <Link href={`/room/${r.code}`}>
+                        Control Centre
+                      </Link>
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+
+        <Separator className="my-8" />
+
         {/* ----------------------------------------------- question bank */}
         <section>
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
@@ -213,12 +283,20 @@ export function Dashboard() {
                 <BookOpen className="size-5 text-[var(--primary)]" /> Question bank
               </h2>
               <p className="text-sm text-muted-foreground">
-                Persistent and separate from the temporary room data.
+                Persistent and separate from the temporary room data. Organize questions into Sets.
               </p>
             </div>
-            <Button onClick={() => setBuilderOpen(true)}>
-              <Plus className="size-4" /> New question
-            </Button>
+            <div className="flex flex-wrap gap-2">
+              <Button variant="outline" onClick={() => setGuideOpen(true)}>
+                <BookOpen className="size-4 text-blue-500" /> AI Prompt Guide
+              </Button>
+              <Button variant="outline" onClick={() => setImportOpen(true)}>
+                <Zap className="size-4 text-[var(--ember)]" /> Import JSON Set
+              </Button>
+              <Button onClick={() => setBuilderOpen(true)}>
+                <Plus className="size-4" /> New question
+              </Button>
+            </div>
           </div>
 
           {loadingQs ? (
@@ -247,6 +325,11 @@ export function Dashboard() {
                     <div className="min-w-0 flex-1">
                       <p className="font-medium break-words">{q.prompt}</p>
                       <div className="mt-2 flex flex-wrap gap-2 text-xs">
+                        {q.set_name && (
+                          <Badge className="bg-[var(--ember)]/15 text-[var(--primary)] border-[var(--ember)]/30 font-bold">
+                            Set: {q.set_name}
+                          </Badge>
+                        )}
                         <Badge variant="outline">{q.type.replace("_", " ")}</Badge>
                         <Badge variant="outline">{q.difficulty}</Badge>
                         <Badge variant="outline">
@@ -278,7 +361,274 @@ export function Dashboard() {
           void loadBank();
         }}
       />
+
+      <JsonImporter
+        open={importOpen}
+        onOpenChange={setImportOpen}
+        onSaved={() => {
+          setImportOpen(false);
+          void loadBank();
+        }}
+      />
+
+      <AiPromptGuideModal
+        open={guideOpen}
+        onOpenChange={setGuideOpen}
+        onOpenImport={() => {
+          setGuideOpen(false);
+          setImportOpen(true);
+        }}
+      />
     </div>
+  );
+}
+
+function AiPromptGuideModal({
+  open,
+  onOpenChange,
+  onOpenImport,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  onOpenImport: () => void;
+}) {
+  const fullAiPrompt = `You are a physics teacher's assistant. Generate a high-quality JSON array of physics classroom questions formatted for the Rain of Physics platform.
+
+Strict Rules:
+1. Output ONLY a valid JSON array of question objects (no markdown, no extra commentary).
+2. "type" MUST be one of: "mcq", "true_false", "prediction", "numerical", "find_error", "exit_ticket".
+3. For "mcq", "prediction", "find_error", "exit_ticket":
+   - "options": array of 2 to 4 string choices.
+   - "correct_answer": array with 0-indexed position of correct choice, e.g. [0] or [1].
+4. For "true_false":
+   - "options": ["True", "False"]
+   - "correct_answer": [0] for True or [1] for False.
+5. For "numerical":
+   - "options": []
+   - "correct_answer": ["<value>", "<tolerance>"], e.g. ["9.8", "0.1"].
+6. "difficulty": "Easy", "Medium", "Hard", or "Boss".
+7. "timer_seconds": integer between 10 and 90 (e.g., 30).
+8. "explanation": short educational explanation why the answer is correct.
+
+Example Format:
+[
+  {
+    "prompt": "A object moves at constant velocity. What is its acceleration?",
+    "type": "mcq",
+    "options": ["Zero", "9.8 m/s²", "Increasing", "Depends on mass"],
+    "correct_answer": [0],
+    "explanation": "Constant velocity means zero rate of change of velocity, hence zero acceleration.",
+    "timer_seconds": 30,
+    "difficulty": "Easy"
+  },
+  {
+    "prompt": "Calculate the force needed to accelerate a 5kg mass at 2 m/s².",
+    "type": "numerical",
+    "options": [],
+    "correct_answer": ["10", "0"],
+    "explanation": "F = m * a = 5 * 2 = 10 N.",
+    "timer_seconds": 45,
+    "difficulty": "Medium"
+  }
+]
+
+Please generate 5 questions about [INSERT TOPIC HERE].`;
+
+  const copyGuidePrompt = () => {
+    void navigator.clipboard.writeText(fullAiPrompt);
+    toast.success("AI Prompt Guide copied to clipboard!");
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle className="font-display text-xl font-extrabold flex items-center gap-2">
+            <BookOpen className="size-5 text-blue-500" /> AI Question Generator Guide (ChatGPT / Gemini)
+          </DialogTitle>
+          <DialogDescription>
+            Use this master prompt guide to instruct ChatGPT, Gemini, or Claude to generate compatible Question Sets with zero syntax or formatting errors.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="grid gap-4">
+          <div className="rounded-xl border border-blue-200 bg-blue-50/50 dark:bg-blue-950/20 p-4 text-xs space-y-2">
+            <p className="font-bold text-blue-900 dark:text-blue-300">Supported Question Types:</p>
+            <ul className="list-disc pl-4 space-y-1 text-muted-foreground">
+              <li><strong className="text-foreground">mcq</strong>: Multiple Choice Question (2–4 options, index in <code className="bg-muted px-1 rounded">correct_answer</code>).</li>
+              <li><strong className="text-foreground">true_false</strong>: True/False (<code className="bg-muted px-1 rounded">[0]</code> for True, <code className="bg-muted px-1 rounded">[1]</code> for False).</li>
+              <li><strong className="text-foreground">numerical</strong>: Numeric answer (<code className="bg-muted px-1 rounded">{`["value", "tolerance"]`}</code>, e.g. <code className="bg-muted px-1 rounded">{`["9.8", "0.1"]`}</code>).</li>
+              <li><strong className="text-foreground">prediction</strong> / <strong className="text-foreground">find_error</strong> / <strong className="text-foreground">exit_ticket</strong>: Specialized conceptual activities.</li>
+            </ul>
+          </div>
+
+          <div className="grid gap-2">
+            <div className="flex items-center justify-between">
+              <Label className="font-bold">Full AI Master Prompt</Label>
+              <Button size="xs" variant="outline" onClick={copyGuidePrompt}>
+                Copy Full Prompt
+              </Button>
+            </div>
+            <textarea
+              readOnly
+              rows={12}
+              className="w-full rounded-md border border-border bg-muted/60 p-3 font-mono text-[11px] text-muted-foreground focus:outline-none"
+              value={fullAiPrompt}
+            />
+          </div>
+        </div>
+
+        <DialogFooter className="gap-2 sm:gap-0">
+          <Button variant="outline" onClick={() => onOpenChange(false)}>
+            Close
+          </Button>
+          <Button onClick={copyGuidePrompt}>
+            Copy Prompt &amp; Go to ChatGPT
+          </Button>
+          <Button onClick={onOpenImport} className="bg-[var(--ember)] text-white hover:bg-[var(--ember)]/90">
+            Open Importer
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function JsonImporter({
+  open,
+  onOpenChange,
+  onSaved,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  onSaved: () => void;
+}) {
+  const [setName, setSetName] = useState("");
+  const [jsonText, setJsonText] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const samplePrompt = `Prompt for ChatGPT / Gemini:
+"Generate a JSON array of 5 physics questions in this exact JSON format:
+[
+  {
+    "prompt": "What is Newton's First Law?",
+    "type": "mcq",
+    "options": ["Law of Inertia", "F=ma", "Action-Reaction", "Gravity"],
+    "correct_answer": [0],
+    "explanation": "Newton's 1st law is also known as the Law of Inertia.",
+    "timer_seconds": 30,
+    "difficulty": "Easy"
+  }
+]"`;
+
+  const copySamplePrompt = () => {
+    void navigator.clipboard.writeText(samplePrompt);
+    toast.success("Copied ChatGPT/Gemini prompt template!");
+  };
+
+  async function handleImport() {
+    if (!setName.trim()) return toast.error("Enter a Set Name (e.g., 'Kinematics Quiz 1')");
+    if (!jsonText.trim()) return toast.error("Paste JSON questions first");
+
+    let parsed: unknown[];
+    try {
+      const res = JSON.parse(jsonText.trim());
+      if (!Array.isArray(res)) {
+        throw new Error("JSON must be an array of question objects");
+      }
+      parsed = res;
+    } catch {
+      return toast.error("Invalid JSON format. Check syntax.");
+    }
+
+    setBusy(true);
+    try {
+      const rows = parsed.map((item) => {
+        const q = item as Record<string, unknown>;
+        return {
+          set_name: setName.trim(),
+          prompt: typeof q.prompt === "string" ? q.prompt : "Untitled Question",
+          type: typeof q.type === "string" ? q.type : "mcq",
+          options: Array.isArray(q.options) ? q.options : [],
+          correct_answer: Array.isArray(q.correct_answer) ? q.correct_answer : [0],
+          explanation: typeof q.explanation === "string" ? q.explanation : null,
+          timer_seconds: typeof q.timer_seconds === "number" ? q.timer_seconds : 30,
+          difficulty: typeof q.difficulty === "string" ? q.difficulty : "Medium",
+        };
+      });
+
+      const { error } = await supabase.from("questions").insert(rows);
+      if (error) throw new Error(error.message);
+
+      toast.success(`Imported ${rows.length} questions into Set "${setName.trim()}"!`);
+      setSetName("");
+      setJsonText("");
+      onSaved();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to import questions");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-xl">
+        <DialogHeader>
+          <DialogTitle className="font-display text-lg font-extrabold">
+            Bulk Import Question Set via AI (ChatGPT / Gemini)
+          </DialogTitle>
+          <DialogDescription>
+            Generate questions with AI using the prompt template below, then paste the JSON result to save them as a Question Set.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="grid gap-4">
+          <div className="rounded-xl border border-border bg-muted/50 p-3">
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-xs font-bold text-muted-foreground uppercase">AI Prompt Template</span>
+              <Button size="xs" variant="ghost" onClick={copySamplePrompt}>
+                Copy Prompt
+              </Button>
+            </div>
+            <pre className="text-[11px] font-mono text-muted-foreground whitespace-pre-wrap break-words">
+              {samplePrompt}
+            </pre>
+          </div>
+
+          <div className="grid gap-2">
+            <Label htmlFor="set-name">Question Set Name</Label>
+            <Input
+              id="set-name"
+              value={setName}
+              onChange={(e) => setSetName(e.target.value)}
+              placeholder="e.g. Mechanics Chapter 1"
+            />
+          </div>
+
+          <div className="grid gap-2">
+            <Label htmlFor="json-paste">Paste JSON Output</Label>
+            <textarea
+              id="json-paste"
+              rows={8}
+              className="w-full rounded-md border border-border bg-card p-3 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-[var(--primary)]"
+              value={jsonText}
+              onChange={(e) => setJsonText(e.target.value)}
+              placeholder='[{"prompt": "...", "type": "mcq", ...}]'
+            />
+          </div>
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button onClick={() => void handleImport()} disabled={busy}>
+            {busy && <Loader2 className="size-4 animate-spin" />} Import Set
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -345,7 +695,7 @@ function QuestionBuilder({
         explanation: explanation.trim() || null,
         timer_seconds: timer,
         difficulty,
-        topic_id: topicId || null,
+        topic_id: topicId && topicId !== "none" ? topicId : null,
       });
       if (error) throw new Error(error.message);
       toast.success("Saved to your bank");

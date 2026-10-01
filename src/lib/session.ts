@@ -23,6 +23,8 @@ function key(roomCode: string) {
 export function saveSession(s: StoredSession): void {
   if (typeof window === "undefined") return;
   try {
+    // Save to sessionStorage first so each browser tab gets its own unique student session
+    window.sessionStorage.setItem(key(s.roomCode), JSON.stringify(s));
     window.localStorage.setItem(key(s.roomCode), JSON.stringify(s));
   } catch {
     /* storage disabled — reconnection simply won't persist */
@@ -32,9 +34,14 @@ export function saveSession(s: StoredSession): void {
 export function loadSession(roomCode: string): StoredSession | null {
   if (typeof window === "undefined") return null;
   try {
-    const raw = window.localStorage.getItem(key(roomCode));
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as StoredSession;
+    const sessionRaw = window.sessionStorage.getItem(key(roomCode));
+    if (sessionRaw) {
+      const parsed = JSON.parse(sessionRaw) as StoredSession;
+      if (parsed?.token) return parsed;
+    }
+    const localRaw = window.localStorage.getItem(key(roomCode));
+    if (!localRaw) return null;
+    const parsed = JSON.parse(localRaw) as StoredSession;
     if (!parsed?.token) return null;
     return parsed;
   } catch {
@@ -45,6 +52,7 @@ export function loadSession(roomCode: string): StoredSession | null {
 export function clearSession(roomCode: string): void {
   if (typeof window === "undefined") return;
   try {
+    window.sessionStorage.removeItem(key(roomCode));
     window.localStorage.removeItem(key(roomCode));
   } catch {
     /* ignore */

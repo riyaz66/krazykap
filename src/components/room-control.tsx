@@ -8,6 +8,7 @@ import { ResponseBars } from "@/components/response-bars";
 import { ValueBars, groupValues } from "@/components/value-bars";
 import { TimerRing } from "@/components/timer-ring";
 import { Leaderboard } from "@/components/leaderboard";
+import { PodiumView } from "@/components/podium-view";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -42,7 +43,6 @@ import {
   rpcError,
   setActivityState,
   setRoomSettings,
-  autoAssignTeams,
   decideChallenge,
 } from "@/lib/rpc";
 import {
@@ -201,6 +201,8 @@ function ControlHeader({
   const [confirming, setConfirming] = useState(false);
   const [ending, setEnding] = useState(false);
 
+  const [podiumModalOpen, setPodiumModalOpen] = useState(false);
+
   return (
     <header className="sticky top-0 z-30 border-b border-border bg-card/85 backdrop-blur">
       <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-3 px-4 py-3 sm:px-6">
@@ -237,6 +239,9 @@ function ControlHeader({
         )}
 
         <div className="ml-auto flex items-center gap-2">
+          <Button variant="outline" size="sm" onClick={() => setPodiumModalOpen(true)}>
+            🏆 Podium
+          </Button>
           <Button variant="ghost" size="sm" onClick={() => onSummaryOpenChange(true)}>
             <BarChart3 className="size-4" /> Summary
           </Button>
@@ -259,6 +264,17 @@ function ControlHeader({
         summary={summary}
         running={status === "active" || status === "lobby"}
       />
+
+      <Dialog open={podiumModalOpen} onOpenChange={setPodiumModalOpen}>
+        <DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-3xl">
+          <DialogHeader>
+            <DialogTitle className="font-display text-xl font-extrabold">
+              🏆 Olympic Podium Stand
+            </DialogTitle>
+          </DialogHeader>
+          <PodiumView leaderboard={summary?.leaderboard || []} />
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={confirming} onOpenChange={setConfirming}>
         <DialogContent className="sm:max-w-sm">
@@ -340,18 +356,6 @@ function RoomBody({
           <div className="flex flex-wrap gap-2">
             <Button size="lg" onClick={() => setComposerOpen(true)}>
               <Plus className="size-4" /> New question
-            </Button>
-            <Button
-              size="lg"
-              variant="outline"
-              onClick={async () => {
-                const { error } = await autoAssignTeams(roomId, 2);
-                if (error) return toast.error(error);
-                toast.success("Teams assigned");
-                onChange();
-              }}
-            >
-              <Users className="size-4" /> Auto teams
             </Button>
           </div>
         )}
@@ -834,6 +838,18 @@ function SettingsCard({
 
 /* ------------------------------------------------------------ composer --- */
 
+interface BankQuestion {
+  id: string;
+  prompt: string;
+  type: string;
+  options: string[];
+  correct_answer: (string | number)[];
+  explanation: string | null;
+  timer_seconds: number;
+  difficulty: Difficulty;
+  set_name: string | null;
+}
+
 function QuestionComposer({
   open,
   onOpenChange,
@@ -856,6 +872,67 @@ function QuestionComposer({
   const [difficulty, setDifficulty] = useState<Difficulty>("Medium");
   const [topic, setTopic] = useState("");
   const [busy, setBusy] = useState(false);
+
+  const [bankQuestions, setBankQuestions] = useState<BankQuestion[]>([]);
+  const [selectedSetFilter, setSelectedSetFilter] = useState<string>("all");
+  const [currentSetIndex, setCurrentSetIndex] = useState<number>(0);
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    void (async () => {
+      const { createClient } = await import("@/lib/client");
+      const sb = createClient();
+      const { data } = await sb
+        .from("questions")
+        .select("id,prompt,type,options,correct_answer,explanation,timer_seconds,difficulty,set_name")
+        .order("created_at", { ascending: false })
+        .limit(50);
+      if (cancelled) return;
+      if (data) setBankQuestions(data as BankQuestion[]);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
+
+  const availableSets = useMemo(() => {
+    const sets = new Set<string>();
+    bankQuestions.forEach((bq) => {
+      if (bq.set_name) sets.add(bq.set_name);
+    });
+    return Array.from(sets);
+  }, [bankQuestions]);
+
+  const filteredBankQuestions = useMemo(() => {
+    if (selectedSetFilter === "all") return bankQuestions;
+    return bankQuestions.filter((bq) => bq.set_name === selectedSetFilter);
+  }, [bankQuestions, selectedSetFilter]);
+
+  function pickFromBank(q: BankQuestion) {
+    setPrompt(q.prompt);
+    setType(q.type);
+    if (q.type === "numerical") {
+      setNumeric(String(q.correct_answer?.[0] ?? ""));
+      setTolerance(String(q.correct_answer?.[1] ?? "0"));
+    } else {
+      setOptions(q.options && q.options.length > 0 ? q.options : ["", "", "", ""]);
+      setCorrectIdx(
+        typeof q.correct_answer?.[0] === "number" ? (q.correct_answer[0] as number) : 0
+      );
+    }
+    if (q.explanation) setExplanation(q.explanation);
+    if (q.timer_seconds) setTimer(q.timer_seconds);
+    if (q.difficulty) setDifficulty(q.difficulty);
+    toast.success("Loaded question from bank");
+  }
+
+  function handleLaunchNextInSet() {
+    if (filteredBankQuestions.length === 0) return;
+    const nextQ = filteredBankQuestions[currentSetIndex % filteredBankQuestions.length];
+    pickFromBank(nextQ);
+    setCurrentSetIndex((prev) => (prev + 1) % filteredBankQuestions.length);
+  }
 
   // true_false and exit_ticket present a fixed, non-editable option shelf.
   // The launch payload has to use it — the free-form `options` state is empty
@@ -932,6 +1009,61 @@ function QuestionComposer({
             Goes live on every connected phone the moment you press Launch.
           </DialogDescription>
         </DialogHeader>
+
+        {bankQuestions.length > 0 && (
+          <div className="grid gap-2 border-b border-border pb-4">
+            <div className="flex items-center justify-between">
+              <Label className="text-xs font-bold text-[var(--primary)] uppercase tracking-wide">
+                Pick from Question Bank
+              </Label>
+              {availableSets.length > 0 && (
+                <div className="flex items-center gap-2">
+                  <Select
+                    value={selectedSetFilter}
+                    onValueChange={(val) => {
+                      setSelectedSetFilter(val ?? "all");
+                      setCurrentSetIndex(0);
+                    }}
+                  >
+                    <SelectTrigger className="h-7 w-[160px] text-xs">
+                      <SelectValue placeholder="Filter by Set" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">All Sets / Questions</SelectItem>
+                      {availableSets.map((s) => (
+                        <SelectItem key={s} value={s}>
+                          Set: {s}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  {selectedSetFilter !== "all" && (
+                    <Button size="xs" variant="secondary" onClick={handleLaunchNextInSet}>
+                      Load Next in Set ⏭
+                    </Button>
+                  )}
+                </div>
+              )}
+            </div>
+            <Select onValueChange={(qId) => {
+              const selected = bankQuestions.find(bq => bq.id === qId);
+              if (selected) pickFromBank(selected);
+            }}>
+              <SelectTrigger className="w-full">
+                <SelectValue placeholder="Select a saved question..." />
+              </SelectTrigger>
+              <SelectContent>
+                {filteredBankQuestions.map((q) => (
+                  <SelectItem key={q.id} value={q.id}>
+                    <span className="truncate max-w-[320px] inline-block">
+                      {q.set_name ? `[${q.set_name}] ` : ""}{q.prompt}
+                    </span>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        )}
 
         <div className="grid gap-2">
           <Label>Quick Challenge</Label>
@@ -1029,20 +1161,55 @@ function QuestionComposer({
         )}
 
         <div className="grid grid-cols-3 gap-3">
-          <div className="grid gap-2">
-            <Label>Timer</Label>
-            <Select value={String(timer)} onValueChange={(v) => setTimer(Number(v))}>
-              <SelectTrigger className="w-full">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {[10, 20, 30, 45, 60, 90].map((s) => (
-                  <SelectItem key={s} value={String(s)}>
-                    {s}s
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+          <div className="grid gap-2 col-span-2">
+            <Label>Timer Duration</Label>
+            <div className="flex gap-2 items-center">
+              <div className="flex-1">
+                <span className="text-[10px] text-muted-foreground block">Hours</span>
+                <Input
+                  type="number"
+                  min={0}
+                  max={24}
+                  value={Math.floor(timer / 3600)}
+                  onChange={(e) => {
+                    const hrs = Math.max(0, Number(e.target.value));
+                    const mins = Math.floor((timer % 3600) / 60);
+                    const secs = timer % 60;
+                    setTimer(hrs * 3600 + mins * 60 + secs);
+                  }}
+                />
+              </div>
+              <div className="flex-1">
+                <span className="text-[10px] text-muted-foreground block">Mins</span>
+                <Input
+                  type="number"
+                  min={0}
+                  max={59}
+                  value={Math.floor((timer % 3600) / 60)}
+                  onChange={(e) => {
+                    const hrs = Math.floor(timer / 3600);
+                    const mins = Math.max(0, Number(e.target.value));
+                    const secs = timer % 60;
+                    setTimer(hrs * 3600 + mins * 60 + secs);
+                  }}
+                />
+              </div>
+              <div className="flex-1">
+                <span className="text-[10px] text-muted-foreground block">Secs</span>
+                <Input
+                  type="number"
+                  min={0}
+                  max={59}
+                  value={timer % 60}
+                  onChange={(e) => {
+                    const hrs = Math.floor(timer / 3600);
+                    const mins = Math.floor((timer % 3600) / 60);
+                    const secs = Math.max(0, Number(e.target.value));
+                    setTimer(hrs * 3600 + mins * 60 + secs);
+                  }}
+                />
+              </div>
+            </div>
           </div>
           <div className="grid gap-2">
             <Label>Difficulty</Label>
@@ -1171,6 +1338,13 @@ function SummaryDialog({
                 )}
               </div>
             )}
+
+            <div>
+              <p className="mb-2 text-xs font-bold tracking-widest text-muted-foreground uppercase">
+                Top 3 Podium
+              </p>
+              <PodiumView leaderboard={summary.leaderboard} />
+            </div>
 
             <div>
               <p className="mb-2 text-xs font-bold tracking-widest text-muted-foreground uppercase">

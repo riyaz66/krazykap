@@ -68,8 +68,9 @@ export function Leaderboard({
               className={cn(
                 "grid shrink-0 place-items-center rounded-lg font-display font-extrabold tabular-nums",
                 dense ? "size-7 text-xs" : "size-9 text-sm",
-                row.rank <= 3 ? "bg-transparent text-lg" : "bg-muted text-muted-foreground",
+                row.rank <= 3 ? "bg-transparent text-lg font-emoji" : "bg-muted text-muted-foreground",
               )}
+              style={{ fontFamily: '"Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", "Android Emoji", sans-serif' }}
             >
               {row.rank <= 3 ? MEDALS[row.rank - 1] : row.rank}
             </span>

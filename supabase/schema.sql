@@ -42,6 +42,7 @@ create table if not exists public.questions (
   id             uuid primary key default gen_random_uuid(),
   teacher_id     uuid not null references public.teachers (id) on delete cascade,
   topic_id       uuid references public.topics (id) on delete set null,
+  set_name       text,
   prompt         text not null,
   type           text not null default 'mcq'
                  check (type in ('mcq','true_false','prediction','numerical','find_error','exit_ticket')),
@@ -55,6 +56,8 @@ create table if not exists public.questions (
   is_published   boolean not null default true,
   created_at     timestamptz not null default now()
 );
+
+alter table public.questions add column if not exists set_name text;
 
 create index if not exists questions_teacher_idx on public.questions (teacher_id, created_at desc);
 create index if not exists questions_topic_idx    on public.questions (topic_id);
@@ -777,12 +780,7 @@ begin
     v_correct := (p_answer = v_act.correct_answer);
   end if;
 
-  if v_correct then
-    v_points := 100;
-    v_bonus   := public.speed_bonus(v_elapsed, v_window);
-    v_xp     := v_points + v_bonus;
-  end if;
-
+  -- Record response without awarding XP immediately (XP is awarded on reveal)
   if v_exists.id is null then
     insert into public.responses
       (activity_id, participant_id, room_id, answer, confidence, submitted_at,
@@ -790,13 +788,11 @@ begin
     values
       (v_act.id, v_pid, v_rid, coalesce(p_answer,'[]'::jsonb), p_confidence, v_now,
        greatest(0, round(extract(epoch from (v_now - coalesce(v_act.launched_at, v_now))) * 1000)::int),
-       v_correct, v_points, v_bonus, v_xp)
+       v_correct, 0, 0, 0)
     returning * into v_resp;
 
     update public.participants
-       set answered_count = answered_count + 1,
-           correct_count  = correct_count + case when v_correct then 1 else 0 end,
-           xp             = xp + v_xp
+       set answered_count = answered_count + 1
      where id = v_pid;
   else
     update public.responses
@@ -804,21 +800,9 @@ begin
            confidence = p_confidence,
            submitted_at = v_now,
            is_correct = v_correct,
-           base_points = v_points,
-           speed_bonus = v_bonus,
-           xp = v_xp,
            changed_count = changed_count + 1
      where id = v_exists.id
     returning * into v_resp;
-
-    update public.participants
-       set xp           = xp - v_exists.xp + v_xp,
-           -- Same response, so answered_count is untouched — but accuracy must
-           -- follow a corrected answer in either direction.
-           correct_count = greatest(0, correct_count
-                                    + (case when v_correct then 1 else 0 end)
-                                    - (case when v_was_correct then 1 else 0 end))
-     where id = v_pid;
   end if;
 
   -- Streaks (teacher may disable them per room). Only a *transition* to a
@@ -961,9 +945,10 @@ begin
                   then round(100.0 * p.correct_count / p.answered_count) else null end as accuracy,
              (select round(avg(r.reaction_ms)) from public.responses r
                where r.participant_id = p.id) as avg_speed,
-             (select count(*) from public.activities a where a.room_id = p.room_id) as rounds
+             (select count(*) from public.activities a where a.room_id = p.room_id) as rounds,
+             p.joined_at
         from public.participants p
-       where p.room_id = $1
+       where p.room_id = $1 and p.correct_count > 0
     ),
     scored as (
       select *,
@@ -978,9 +963,9 @@ begin
       from base
     )
     select coalesce(jsonb_agg(x order by rn), '[]'::jsonb) from (
-      select row_number() over (order by score desc, xp desc, joined_at_dummy asc) as rn,
+      select row_number() over (order by score desc, xp desc, correct_count desc, coalesce(avg_speed, 999999) asc, joined_at asc, id asc) as rn,
              jsonb_build_object(
-               'rank', row_number() over (order by score desc, xp desc, joined_at_dummy asc),
+               'rank', row_number() over (order by score desc, xp desc, correct_count desc, coalesce(avg_speed, 999999) asc, joined_at asc, id asc),
                'id', id, 'nickname', nickname, 'team', team, 'xp', xp,
                'streak', streak, 'best_streak', best_streak,
                'correct_count', correct_count, 'answered_count', answered_count,
@@ -988,9 +973,9 @@ begin
                'score', score
              ) as x
       from (
-        select *, 0 as joined_at_dummy from scored
+        select p_sub.* from scored p_sub
       ) s
-      order by score desc
+      order by score desc, xp desc, correct_count desc, coalesce(avg_speed, 999999) asc, joined_at asc, id asc
       limit $3
     ) t
   $q$
@@ -1217,11 +1202,48 @@ begin
   if v_act.id is null then raise exception 'activity_not_found' using errcode = 'P0002'; end if;
   if v_act.state = 'closed' then raise exception 'activity_closed' using errcode = 'P0001'; end if;
 
-  -- 'revealed' freezes the clock and stamps the reveal time
+  -- 'revealed' freezes the clock, stamps reveal time, and scores correct answers with XP
   if p_state = 'revealed' then
     update public.activities
        set state = 'revealed', revealed_at = now(), deadline = null, paused = false
      where id = v_act.id returning * into v_act;
+
+    -- Evaluate XP and correct_count for this activity if not already scored
+    if v_act.revealed_at is not null then
+      declare
+        r_rec record;
+        v_speed_rank integer := 1;
+        v_award_xp integer := 0;
+      begin
+        for r_rec in
+          select r.id, r.participant_id, r.reaction_ms
+            from public.responses r
+           where r.activity_id = v_act.id and r.is_correct = true and r.xp = 0
+           order by r.reaction_ms asc, r.submitted_at asc
+        loop
+          if v_speed_rank = 1 then
+            v_award_xp := 20;
+          elsif v_speed_rank = 2 then
+            v_award_xp := 10;
+          elsif v_speed_rank = 3 then
+            v_award_xp := 5;
+          else
+            v_award_xp := 1;
+          end if;
+
+          update public.responses
+             set xp = v_award_xp, base_points = v_award_xp
+           where id = r_rec.id;
+
+          update public.participants
+             set xp = xp + v_award_xp,
+                 correct_count = correct_count + 1
+           where id = r_rec.participant_id;
+
+          v_speed_rank := v_speed_rank + 1;
+        end loop;
+      end;
+    end if;
   elsif p_state = 'answering' then
     -- Re-opening the clock is "here is the full window again", so restart the
     -- speed window too — otherwise elapsed time would be measured from the
